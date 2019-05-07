@@ -101,8 +101,8 @@ static bool_t dsk_open(struct image *im)
      * length and thus the period between index pulses. */
     im->ticks_per_cell = im->write_bc_ticks * 16;
 
-    volume_cache_init(im->bufs.write_data.p + 512 + 8192 + 2,
-                      im->bufs.write_data.p + im->bufs.write_data.len);
+    volume_cache_init(im->bufs.read_data.p + 512 + 1024,
+                      im->bufs.read_data.p + im->bufs.read_data.len);
 
     return TRUE;
 }
@@ -150,14 +150,10 @@ static void dsk_seek_track(
         tib->nr_secs = 29;
 
     /* Compute per-sector actual length. */
-    for (i = 0; i < tib->nr_secs; i++) {
+    for (i = 0; i < tib->nr_secs; i++)
         tib->sib[i].actual_length = im->dsk.extended
             ? le16toh(tib->sib[i].actual_length)
             : 128 << min_t(unsigned, tib->sec_sz, 8);
-        if ((tib->sib[i].actual_length > 8192)
-            || (tib->sib[i].n > 6))
-            F_die(FR_BAD_IMAGE);
-    }
 
 out:
     im->dsk.idx_sz = GAP_4A;
@@ -454,13 +450,12 @@ static bool_t dsk_write_track(struct image *im)
     struct image_buf *wr = &im->bufs.write_bc;
     uint16_t *buf = wr->p;
     unsigned int bufmask = (wr->len / 2) - 1;
-    uint8_t *wrbuf = (uint8_t *)im->bufs.write_data.p + 512; /* skip DIB/TIB */
     uint32_t c = wr->cons / 16, p = wr->prod / 16;
     int32_t base = write->start / im->ticks_per_cell; /* in data bytes */
     unsigned int i;
     time_t t;
     uint16_t crc, sec_sz, off;
-    uint8_t x;
+    uint8_t x, *wrbuf;
 
     /* If we are processing final data then use the end index, rounded up. */
     barrier();
@@ -506,6 +501,7 @@ static bool_t dsk_write_track(struct image *im)
         switch (x) {
 
         case 0xfe: /* IDAM */
+            wrbuf = (uint8_t *)im->bufs.write_data.p + 512; /* skip DIB/TIB */
             for (i = 0; i < 3; i++)
                 wrbuf[i] = 0xa1;
             wrbuf[i++] = x;
@@ -528,6 +524,13 @@ static bool_t dsk_write_track(struct image *im)
             break;
 
         case 0xfb: /* DAM */
+            /* We stash decoded write data *within* the write-bitcell ring.
+             * This is safe because we defer update of the public consumer
+             * index and we produce decoded data at half the rate we consume
+             * raw bitcells. We can even safely round down to a 32-bit boundary
+             * because of the sync header we already consumed (4 bytes min). */
+            wrbuf = (uint8_t *)((uintptr_t)&buf[c & bufmask] & ~3);
+
             for (i = 0; i < (sec_sz + 2); i++)
                 wrbuf[i] = mfmtobin(buf[c++ & bufmask]);
 
@@ -560,8 +563,12 @@ static bool_t dsk_write_track(struct image *im)
             printk("%u us\n", time_diff(t, time_now()) / TIME_MHZ);
             break;
         }
+
+        barrier();
+        wr->cons = c * 16;
     }
 
+    barrier();
     wr->cons = c * 16;
 
     return flush;

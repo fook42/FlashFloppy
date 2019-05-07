@@ -1469,7 +1469,7 @@ static bool_t raw_open(struct image *im)
 {
     im->img.rpm = im->img.rpm ?: 300;
     im->stk_per_rev = (stk_ms(200) * 300) / im->img.rpm;
-    volume_cache_init(im->bufs.write_data.p + 8192 + 2,
+    volume_cache_init(im->bufs.read_data.p + 1024,
                       im->img.heap_bottom);
     return TRUE;
 }
@@ -1690,13 +1690,12 @@ static bool_t raw_write_track(struct image *im)
     struct image_buf *wr = &im->bufs.write_bc;
     uint16_t *buf = wr->p;
     unsigned int bufmask = (wr->len / 2) - 1;
-    uint8_t *wrbuf = im->bufs.write_data.p;
     uint32_t c = wr->cons / 16, p = wr->prod / 16;
     struct raw_sec *sec;
     unsigned int i, off;
     time_t t;
     uint16_t crc, sec_sz;
-    uint8_t id, x, *sec_map;
+    uint8_t id, x, *sec_map, *wrbuf;
     int32_t base;
 
     /* If we are processing final data then use the end index, rounded up. */
@@ -1767,6 +1766,7 @@ static bool_t raw_write_track(struct image *im)
         switch (x) {
 
         case 0xfe: /* IDAM */
+            wrbuf = im->bufs.write_data.p;
             if (im->sync == SYNC_fm) {
                 wrbuf[0] = x;
                 for (i = 1; i < 7; i++)
@@ -1798,6 +1798,13 @@ static bool_t raw_write_track(struct image *im)
             break;
 
         case 0xfb: /* DAM */
+            /* We stash decoded write data *within* the write-bitcell ring.
+             * This is safe because we defer update of the public consumer
+             * index and we produce decoded data at half the rate we consume
+             * raw bitcells. We can even safely round down to a 32-bit boundary
+             * because of the sync header we already consumed (4 bytes min). */
+            wrbuf = (uint8_t *)((uintptr_t)&buf[c & bufmask] & ~3);
+
             for (i = 0; i < (sec_sz + 2); i++)
                 wrbuf[i] = mfmtobin(buf[c++ & bufmask]);
 
@@ -1836,8 +1843,12 @@ static bool_t raw_write_track(struct image *im)
             printk("%u us\n", time_diff(t, time_now()) / TIME_MHZ);
             break;
         }
+
+        barrier();
+        wr->cons = c * 16;
     }
 
+    barrier();
     wr->cons = c * 16;
 
     return flush;
@@ -1918,7 +1929,7 @@ static void *align_p(void *p)
 static void check_p(void *p, struct image *im)
 {
     uint8_t *a = p, *b = (uint8_t *)im->bufs.read_data.p;
-    if ((int32_t)(a-b) < (8192+2))
+    if ((int32_t)(a-b) < 1024)
         F_die(FR_BAD_IMAGE);
     im->img.heap_bottom = p;
 }
