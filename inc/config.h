@@ -103,6 +103,11 @@ struct __packed ff_cfg {
 #define TEXTSIZE_small 0
 #define TEXTSIZE_big   1
     uint8_t display_textsize;
+#define TEXT_none      0
+#define TEXT_name      1
+#define TEXT_track     2
+#define TEXT_spare     3
+    uint8_t text_rowcontent;
 #define ROT_none      0
 #define ROT_full      1
 #define ROT_half      3
